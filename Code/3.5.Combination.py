@@ -75,9 +75,9 @@ def get_model_forecasts(stn_code):
     return results
 
 def calculate_metrics(y_true, y_pred, zenith):
-    """Calculates RMSE, nRMSE, MBE, nMBE for valid daytime data."""
+    """Calculates RMSE, nRMSE, MBE, nMBE for valid daytime data and returns raw sums."""
     common_idx = y_true.index.intersection(y_pred.index)
-    if common_idx.empty: return np.nan, np.nan, np.nan, np.nan
+    if common_idx.empty: return np.nan, np.nan, np.nan, np.nan, None
     
     t = y_true.loc[common_idx]
     p = y_pred.loc[common_idx]
@@ -87,33 +87,81 @@ def calculate_metrics(y_true, y_pred, zenith):
     t_clean = t[mask]
     p_clean = p[mask]
     
-    if len(t_clean) == 0: return np.nan, np.nan, np.nan, np.nan
+    if len(t_clean) == 0: return np.nan, np.nan, np.nan, np.nan, None
         
     diff = p_clean - t_clean
-    rmse = np.sqrt((diff ** 2).mean())
-    mbe = diff.mean()
+    sse = (diff ** 2).sum()
+    error_sum = diff.sum()
+    obs_sum = t_clean.sum()
+    n = len(t_clean)
     
-    mean_obs = t_clean.mean()
+    rmse = np.sqrt(sse / n)
+    mbe = error_sum / n
+    
+    # Normalize
+    mean_obs = obs_sum / n
     if mean_obs != 0:
         nrmse = (rmse / mean_obs) * 100
         nmbe = (mbe / mean_obs) * 100
     else:
         nrmse, nmbe = np.nan, np.nan
-        
-    return rmse, nrmse, mbe, nmbe
+    
+    raw_sums = {'sse': sse, 'e_sum': error_sum, 'obs_sum': obs_sum, 'n': n}
+    return rmse, nrmse, mbe, nmbe, raw_sums
 
-def build_display_df(df_main, df_norm, stations, group_names, best_mode='min'):
+def build_display_df(df_main, df_norm, df_results, var, stations, group_names, best_mode='min'):
     """
     Builds a display DataFrame with LaTeX bolding for best results.
     Format: "Val (nVal)"
+    Uses pooled sums for 'Average' column (consistent with 3.1.Evaluate_Forecast.py)
     """
     display_df = pd.DataFrame(index=group_names, columns=stations + ['Average'])
+    
+    # Precompute pooled metrics for each group for 'Average' column best selection
+    pooled_metrics = {}
+    for grp in group_names:
+        if grp not in df_main.index:
+            continue
+            
+        sums = {'sse': 0, 'e_sum': 0, 'obs_sum': 0, 'n': 0}
+        baseline_sse = 0
+        
+        for s in stations:
+            match = df_results[(df_results['Station'] == s) & (df_results['Group'] == grp) & (df_results['Variable'] == var)]
+            if not match.empty:
+                rs = match.iloc[0]['raw_sums']
+                if rs:
+                    for k in sums: sums[k] += rs[k]
+                
+                # For skill score: need baseline RMSE
+                if best_mode == 'max':
+                    match_base = df_results[(df_results['Station'] == s) & (df_results['Group'] == BASELINE_MODEL) & (df_results['Variable'] == var)]
+                    if not match_base.empty:
+                        rs_base = match_base.iloc[0]['raw_sums']
+                        if rs_base: baseline_sse += rs_base['sse']
+        
+        if sums['n'] > 0:
+            if best_mode == 'max':  # Skill Score
+                rmse_pooled = np.sqrt(sums['sse'] / sums['n'])
+                base_rmse_pooled = np.sqrt(baseline_sse / sums['n']) if baseline_sse > 0 else 0
+                v = (1 - (rmse_pooled / base_rmse_pooled)) * 100 if base_rmse_pooled != 0 else np.nan
+            elif best_mode == 'min':  # RMSE
+                v = np.sqrt(sums['sse'] / sums['n'])
+            elif best_mode == 'abs_min':  # MBE (absolute value for best selection)
+                v = sums['e_sum'] / sums['n']
+            else:  # MBE raw (should not happen)
+                v = sums['e_sum'] / sums['n']
+        else:
+            v = np.nan
+        
+        pooled_metrics[grp] = v
     
     # Identify "Best" per station (column)
     best_indices = {}
     for col in stations + ['Average']:
         if col == 'Average':
-            series = df_main.mean(axis=1) if col not in df_main.columns else df_main[col]
+            # Use pooled metrics for best model selection
+            series = pd.Series(pooled_metrics)
         else:
             series = df_main[col]
         
@@ -134,14 +182,36 @@ def build_display_df(df_main, df_norm, stations, group_names, best_mode='min'):
             for stn in stations + ['Average']: display_df.at[grp, stn] = ""
             continue
             
-        vals_main = df_main.loc[grp].values.astype(float)
-        if df_norm is not None:
-            vals_norm = df_norm.loc[grp].values.astype(float)
-        
         for stn in stations + ['Average']:
             if stn == 'Average':
-                v = np.nanmean(vals_main)
-                nv = np.nanmean(vals_norm) if df_norm is not None else None
+                # Reuse pooled computation for display value
+                sums = {'sse': 0, 'e_sum': 0, 'obs_sum': 0, 'n': 0}
+                baseline_sse = 0
+                for s in stations:
+                    match = df_results[(df_results['Station'] == s) & (df_results['Group'] == grp) & (df_results['Variable'] == var)]
+                    if not match.empty:
+                        rs = match.iloc[0]['raw_sums']
+                        if rs:
+                            for k in sums: sums[k] += rs[k]
+                        
+                        # Skill handling: need pooled baseline RMSE
+                        if best_mode == 'max':
+                            match_base = df_results[(df_results['Station'] == s) & (df_results['Group'] == BASELINE_MODEL) & (df_results['Variable'] == var)]
+                            if not match_base.empty:
+                                rs_base = match_base.iloc[0]['raw_sums']
+                                if rs_base: baseline_sse += rs_base['sse']
+                
+                if sums['n'] > 0:
+                    if best_mode == 'max': # Skill Score
+                        rmse_pooled = np.sqrt(sums['sse'] / sums['n'])
+                        base_rmse_pooled = np.sqrt(baseline_sse / sums['n']) if baseline_sse > 0 else 0
+                        v = (1 - (rmse_pooled / base_rmse_pooled)) * 100 if base_rmse_pooled != 0 else np.nan
+                        nv = None
+                    else: # RMSE or MBE
+                        v = np.sqrt(sums['sse'] / sums['n']) if best_mode == 'min' else (sums['e_sum'] / sums['n'])
+                        nv = (v / (sums['obs_sum'] / sums['n']) * 100) if sums['obs_sum'] != 0 else np.nan
+                else:
+                    v, nv = np.nan, np.nan
             else:
                 v = df_main.at[grp, stn]
                 nv = df_norm.at[grp, stn] if df_norm is not None else None
@@ -190,8 +260,14 @@ def main():
             zenith = df_obs['zenith_angle']
             
             baseline_rmse = np.nan
+            baseline_sums = None
             if BASELINE_MODEL in forecasts[var]:
-                baseline_rmse, _, _, _ = calculate_metrics(y_true, forecasts[var][BASELINE_MODEL], zenith)
+                baseline_rmse, _, _, _, baseline_sums = calculate_metrics(y_true, forecasts[var][BASELINE_MODEL], zenith)
+                # Store baseline sums for skill calculation in Average col
+                results_list.append({
+                    'Station': stn_disp, 'Variable': var, 'Group': BASELINE_MODEL,
+                    'RMSE': baseline_rmse, 'raw_sums': baseline_sums
+                })
             
             # 1. Standard Ensembles (Regression, TSFMs, All)
             for group_name, model_list in GROUPS.items():
@@ -206,11 +282,12 @@ def main():
                 combined_df = combined_df.loc[:, ~combined_df.columns.duplicated()]
                 group_pred = combined_df.mean(axis=1)
                 
-                rmse, nrmse, mbe, nmbe = calculate_metrics(y_true, group_pred, zenith)
+                rmse, nrmse, mbe, nmbe, raw_sums = calculate_metrics(y_true, group_pred, zenith)
                 skill = (1 - (rmse / baseline_rmse)) * 100 if not np.isnan(baseline_rmse) else np.nan
                 results_list.append({
                     'Station': stn_disp, 'Variable': var, 'Group': group_name,
-                    'RMSE': rmse, 'nRMSE': nrmse, 'MBE': mbe, 'nMBE': nmbe, 'Skill': skill
+                    'RMSE': rmse, 'nRMSE': nrmse, 'MBE': mbe, 'nMBE': nmbe, 'Skill': skill,
+                    'raw_sums': raw_sums
                 })
             
             # 2. 'Oracle' model
@@ -233,11 +310,12 @@ def main():
                 oracle_values = f_np[np.arange(len(f_np)), best_mdls_indices]
                 oracle_pred = pd.Series(oracle_values, index=common_idx)
                 
-                rmse, nrmse, mbe, nmbe = calculate_metrics(y_true, oracle_pred, zenith)
+                rmse, nrmse, mbe, nmbe, raw_sums = calculate_metrics(y_true, oracle_pred, zenith)
                 skill = (1 - (rmse / baseline_rmse)) * 100 if not np.isnan(baseline_rmse) else np.nan
                 results_list.append({
                     'Station': stn_disp, 'Variable': var, 'Group': 'Oracle',
-                    'RMSE': rmse, 'nRMSE': nrmse, 'MBE': mbe, 'nMBE': nmbe, 'Skill': skill
+                    'RMSE': rmse, 'nRMSE': nrmse, 'MBE': mbe, 'nMBE': nmbe, 'Skill': skill,
+                    'raw_sums': raw_sums
                 })
     
     df_results = pd.DataFrame(results_list)
@@ -252,7 +330,7 @@ def main():
             
             df_rmse = df_var.pivot_table(index='Group', columns='Station', values='RMSE').reindex(group_order)
             df_nrmse = df_var.pivot_table(index='Group', columns='Station', values='nRMSE').reindex(group_order)
-            display_rmse = build_display_df(df_rmse, df_nrmse, stations_display, group_order, best_mode='min')
+            display_rmse = build_display_df(df_rmse, df_nrmse, df_results, var, stations_display, group_order, best_mode='min')
             
             f.write(f"\\section*{{Combination Performance - {var} - RMSE (nRMSE \\%)}}\n")
             f.write(display_rmse.to_latex(escape=False, caption=f"{var} RMSE and nRMSE for Ensembles"))
@@ -264,7 +342,7 @@ def main():
             if df_var.empty: continue
             
             df_skill = df_var.pivot_table(index='Group', columns='Station', values='Skill').reindex(group_order)
-            display_skill = build_display_df(df_skill, None, stations_display, group_order, best_mode='max')
+            display_skill = build_display_df(df_skill, None, df_results, var, stations_display, group_order, best_mode='max')
             
             f.write(f"\\section*{{Combination Performance - {var} - Skill Score (\\%)}}\n")
             f.write(display_skill.to_latex(escape=False, caption=f"{var} Skill for Ensembles"))
@@ -277,7 +355,7 @@ def main():
             
             df_mbe = df_var.pivot_table(index='Group', columns='Station', values='MBE').reindex(group_order)
             df_nmbe = df_var.pivot_table(index='Group', columns='Station', values='nMBE').reindex(group_order)
-            display_mbe = build_display_df(df_mbe, df_nmbe, stations_display, group_order, best_mode='abs_min')
+            display_mbe = build_display_df(df_mbe, df_nmbe, df_results, var, stations_display, group_order, best_mode='abs_min')
             
             f.write(f"\\section*{{Combination Performance - {var} - MBE (nMBE \\%)}}\n")
             f.write(display_mbe.to_latex(escape=False, caption=f"{var} MBE and nMBE for Ensembles"))

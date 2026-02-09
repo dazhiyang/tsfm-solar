@@ -73,7 +73,7 @@ def get_model_forecasts(stn_code):
     return results
 
 def calculate_metrics(y_true, y_pred, zenith):
-    """Calculates RMSE, nRMSE, MBE, nMBE for valid daytime data."""
+    """Calculates RMSE, nRMSE, MBE, nMBE for valid daytime data and returns raw sums."""
     # Align indices
     common_idx = y_true.index.intersection(y_pred.index)
     t = y_true.loc[common_idx]
@@ -87,16 +87,20 @@ def calculate_metrics(y_true, y_pred, zenith):
     p_clean = p[mask]
     
     if len(t_clean) == 0:
-        return np.nan, np.nan, np.nan, np.nan
+        return np.nan, np.nan, np.nan, np.nan, None
         
     # Stats
     diff = p_clean - t_clean
-    mse = (diff ** 2).mean()
-    rmse = np.sqrt(mse)
-    mbe = diff.mean()
+    sse = (diff ** 2).sum()
+    error_sum = diff.sum()
+    obs_sum = t_clean.sum()
+    n = len(t_clean)
+    
+    rmse = np.sqrt(sse / n)
+    mbe = error_sum / n
     
     # Normalize
-    mean_val = t_clean.mean()
+    mean_val = obs_sum / n
     if mean_val != 0:
         nrmse = (rmse / mean_val) * 100
         nmbe = (mbe / mean_val) * 100
@@ -104,7 +108,8 @@ def calculate_metrics(y_true, y_pred, zenith):
         nrmse = np.nan
         nmbe = np.nan
     
-    return rmse, nrmse, mbe, nmbe
+    raw_sums = {'sse': sse, 'e_sum': error_sum, 'obs_sum': obs_sum, 'n': n}
+    return rmse, nrmse, mbe, nmbe, raw_sums
 
 def main():
     print("--- Starting Forecast Evaluation ---")
@@ -150,11 +155,12 @@ def main():
             
             for m_name, y_pred in forecasts[var].items():
                 all_models.add(m_name)
-                rmse, nrmse, mbe, nmbe = calculate_metrics(y_true, y_pred, zenith)
+                rmse, nrmse, mbe, nmbe, raw_sums = calculate_metrics(y_true, y_pred, zenith)
                 
                 metrics[var][m_name] = {
                     'rmse': rmse, 'nrmse': nrmse, 
-                    'mbe': mbe, 'nmbe': nmbe
+                    'mbe': mbe, 'nmbe': nmbe,
+                    'raw_sums': raw_sums
                 }
         
         all_stations_metrics[stn] = metrics
@@ -201,7 +207,7 @@ def main():
         return df.astype(float)
 
     # Helper to build display DF (formatted string) from numeric DFs
-    def build_display_df(df_main, df_norm=None, best_mode='min'):
+    def build_display_df(df_main, df_norm=None, best_mode='min', metric_key='rmse'):
         """
         Builds a display DataFrame with LaTeX bolding for best results.
         best_mode: 'min', 'max', or 'abs_min'
@@ -213,8 +219,34 @@ def main():
         best_indices = {}
         for col in stations + ['Average']:
             if col == 'Average':
-                # Calculate average column numeric values
-                series = df_main.mean(axis=1) if col not in df_main.columns else df_main[col]
+                # Calculate pooled average metrics for all models to find the best
+                avg_series = pd.Series(index=sorted_models, dtype=float)
+                for mdl in sorted_models:
+                    sums = {'sse': 0, 'n': 0, 'e_sum': 0}
+                    baseline_sse = 0
+                    for stn in stations:
+                        rs = all_stations_metrics.get(stn, {}).get(var, {}).get(mdl, {}).get('raw_sums')
+                        if rs:
+                            sums['sse'] += rs['sse']
+                            sums['n'] += rs['n']
+                            sums['e_sum'] += rs['e_sum']
+                        
+                        # For skill score: need baseline RMSE
+                        if metric_key == 'skill':
+                            rs_base = all_stations_metrics.get(stn, {}).get(var, {}).get(BASELINE_MODEL, {}).get('raw_sums')
+                            if rs_base:
+                                baseline_sse += rs_base['sse']
+                    
+                    if sums['n'] > 0:
+                        if metric_key == 'rmse':
+                            avg_series[mdl] = np.sqrt(sums['sse'] / sums['n'])
+                        elif metric_key == 'mbe':
+                            avg_series[mdl] = sums['e_sum'] / sums['n']
+                        elif metric_key == 'skill':
+                            rmse_pooled = np.sqrt(sums['sse'] / sums['n'])
+                            base_rmse_pooled = np.sqrt(baseline_sse / sums['n']) if baseline_sse > 0 else 0
+                            avg_series[mdl] = (1 - (rmse_pooled / base_rmse_pooled)) * 100 if base_rmse_pooled != 0 else np.nan
+                series = avg_series
             else:
                 series = df_main[col]
             
@@ -231,19 +263,44 @@ def main():
                 best_indices[col] = valid_series.abs().idxmin()
         
         for mdl in sorted_models:
-            vals_main = df_main.loc[mdl].values.astype(float)
-            
             # Per Station
             for stn in stations + ['Average']:
                 if stn == 'Average':
-                    v = np.nanmean(vals_main)
-                    if df_norm is not None:
-                        vals_norm = df_norm.loc[mdl].values.astype(float)
-                        nv = np.nanmean(vals_norm)
+                    # Aggregate sums across all stations
+                    sums = {'sse': 0, 'e_sum': 0, 'obs_sum': 0, 'n': 0}
+                    baseline_sse = 0
+                    for s in stations:
+                        rs = all_stations_metrics.get(s, {}).get(var, {}).get(mdl, {}).get('raw_sums')
+                        if rs:
+                            for k in sums:
+                                sums[k] += rs[k]
+                        
+                        # For skill score: need baseline RMSE
+                        if metric_key == 'skill':
+                            rs_base = all_stations_metrics.get(s, {}).get(var, {}).get(BASELINE_MODEL, {}).get('raw_sums')
+                            if rs_base:
+                                baseline_sse += rs_base['sse']
+                    
+                    if sums['n'] > 0:
+                        if metric_key == 'rmse':
+                            v = np.sqrt(sums['sse'] / sums['n'])
+                            nv = (v / (sums['obs_sum'] / sums['n']) * 100) if sums['obs_sum'] != 0 else np.nan
+                        elif metric_key == 'mbe':
+                            v = sums['e_sum'] / sums['n']
+                            nv = (v / (sums['obs_sum'] / sums['n']) * 100) if sums['obs_sum'] != 0 else np.nan
+                        elif metric_key == 'skill':
+                            rmse_pooled = np.sqrt(sums['sse'] / sums['n'])
+                            base_rmse_pooled = np.sqrt(baseline_sse / sums['n']) if baseline_sse > 0 else 0
+                            v = (1 - (rmse_pooled / base_rmse_pooled)) * 100 if base_rmse_pooled != 0 else np.nan
+                            nv = None
+                        else:
+                            # Should not happen
+                            v, nv = np.nan, np.nan
+                    else:
+                        v, nv = np.nan, np.nan
                 else:
                     v = df_main.at[mdl, stn]
-                    if df_norm is not None:
-                        nv = df_norm.at[mdl, stn]
+                    nv = df_norm.at[mdl, stn] if df_norm is not None else None
                 
                 if np.isnan(v):
                     display_df.at[mdl, stn] = ""
@@ -270,20 +327,18 @@ def main():
 
     # 1. RMSE Analysis
     rmse_displays = {}
+    mbe_displays = {} # Initialize mbe_displays here
     for var in variables:
         df_rmse = build_numeric_df(var, 'rmse')
         df_nrmse = build_numeric_df(var, 'nrmse')
         rmse_numeric[var] = df_rmse # Store for Skill
+        # 1. RMSE (nRMSE)
+        rmse_displays[var] = build_display_df(df_rmse, df_nrmse, best_mode='min', metric_key='rmse')
         
-        rmse_displays[var] = build_display_df(df_rmse, df_nrmse, best_mode='min')
-
-    # 2. MBE Analysis
-    mbe_displays = {}
-    for var in variables:
-        df_mbe = build_numeric_df(var, 'mbe')
-        df_nmbe = build_numeric_df(var, 'nmbe')
-        
-        mbe_displays[var] = build_display_df(df_mbe, df_nmbe, best_mode='abs_min')
+        # 2. MBE (nMBE)
+        df_mbe = build_numeric_df(var, 'mbe') # Moved assignment before usage
+        df_nmbe = build_numeric_df(var, 'nmbe') # Moved assignment before usage
+        mbe_displays[var] = build_display_df(df_mbe, df_nmbe, best_mode='abs_min', metric_key='mbe')
         
     # 3. Skill Score Analysis
     # Skill = 1 - (RMSE_Model / RMSE_Baseline)
@@ -298,16 +353,11 @@ def main():
             
         rmse_base = df_rmse.loc[BASELINE_MODEL] # Series (Stations)
         
-        # DataFrame division (Row-wise? No, Broadcast)
-        # We want Model_Row / Baseline_Row
-        # df_rmse is [Models x Stations]
-        # rmse_base is [Stations]
-        
         # div(axis=1) matches columns (Stations)
         ratio = df_rmse.div(rmse_base, axis=1)
         skill = (1 - ratio) * 100
         
-        skill_displays[var] = build_display_df(skill, df_norm=None, best_mode='max')
+        skill_displays[var] = build_display_df(skill, df_norm=None, best_mode='max', metric_key='skill')
 
 
     # --- Save Output ---

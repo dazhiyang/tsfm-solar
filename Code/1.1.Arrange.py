@@ -18,8 +18,8 @@ from tqdm import tqdm
 warnings.filterwarnings("ignore")
 
 # --- CONFIGURATION ---
-API_KEY = "0LZFKzj8I0UbCHO3ibF1itJq1JauFeNfQLnhEWdB"  # Replace with your NREL API Key
-EMAIL = "yangdazhi.nus@gmail.com"  # Replace with your registered email
+API_KEY = "YOUR_API_KEY"  # Replace with your NREL API Key
+EMAIL = "YOUR_EMAIL"  # Replace with your registered email
 BASE_URL = f"https://developer.nrel.gov/api/nsrdb/v2/solar/nsrdb-GOES-conus-v4-0-0-download.csv?api_key={API_KEY}"
 YEARS = ["2023", "2024"]
 ATTRIBUTES = "ghi,dni,dhi,clearsky_ghi,clearsky_dni,clearsky_dhi,air_temperature,wind_speed"
