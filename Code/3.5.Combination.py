@@ -32,7 +32,6 @@ GROUPS = {
     ]
 }
 
-# this is a function to load the processed data for a given station code, returning a DataFrame indexed by timestamp
 def load_processed_data(stn_code):
     """Loads the ground truth processed data."""
     pattern = os.path.join(PROCESSED_DIR, f"{stn_code}_15min_qc.csv")
