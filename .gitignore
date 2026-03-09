@@ -49,17 +49,15 @@ ENV/
 # ========== DATA FILES ==========
 # Large raw data files that can be downloaded (~GBs)
 # SURFRAD raw .dat files (very large, can be downloaded from NOAA)
-# Exclude all files in SURFRAD directories, except .gitkeep
+# Exclude all files in SURFRAD directories
 Data/SURFRAD/**/*.dat
 Data/SURFRAD/**/*.dat.gz
 Data/SURFRAD/**/*
-!Data/SURFRAD/.gitkeep
 
 # NSRDB downloads (large, can be re-downloaded from NREL API)
-# Exclude all files in NSRDB directories, except .gitkeep
+# Exclude all files in NSRDB directories
 Data/NSRDB/**/*.csv
 Data/NSRDB/**/*
-!Data/NSRDB/.gitkeep
 
 # ========== LaTeX GENERATED FILES ==========
 # LaTeX compilation artifacts
