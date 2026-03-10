@@ -23,7 +23,6 @@ PROCESSED_DIR = os.path.join(SCRIPT_DIR, "..", "Data", "Processed")
 OUTPUT_DIR = os.path.join(SCRIPT_DIR, "..", "Data", "Forecasts", "Chronos-2")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# Loading data from processed directory for a given station code. Expects files named like "{stn_code}_15min_qc.csv" with a 'timestamp' column.
 def load_processed_data(stn_code):
     pattern = os.path.join(PROCESSED_DIR, f"{stn_code}_15min_qc.csv")
     files = glob.glob(pattern)
